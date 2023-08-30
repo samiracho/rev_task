@@ -1,0 +1,93 @@
+version: 2.1
+orbs:
+  slack: circleci/slack@4.5.0
+
+commands:
+  notify_slack_error:
+    steps:
+      - slack/notify:
+          event: fail
+
+  notify_slack_deploy_pass:
+    steps:
+      - slack/notify:
+          event: pass
+
+aliases:
+  - &default
+      docker:
+        - image: cimg/python:3.8.12-browsers
+      working_directory: ~/repo
+  - &deployment-defaults
+      context: global
+      filters:  
+        branches:
+          only:
+            - master
+            - /hotfix-.*/
+
+jobs:
+  run-tests:
+    <<: *default
+    resource_class: large
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-pip-{{ checksum "requirements.txt" }}
+            - v1-pip-
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover
+      - save_cache:
+          key: v1-pip-{{ checksum "requirements.txt" }}
+          paths:
+            - /home/circleci/.cache/pip
+      - notify_slack_error
+
+  deploy:
+    <<: *default
+    parameters:
+      environment:
+        type: string
+        default: develop
+
+    steps:
+      - checkout
+      - run: ./k8s_deploy.sh << parameters.environment >>
+      - notify_slack_error
+      - notify_slack_deploy_pass
+
+workflows:
+  version: 2
+  build-and-deploy:
+    jobs:
+      - run-tests:
+          context: global
+      - deploy:
+          context: global
+          name: deploy-to-dev
+          environment: dev
+          requires:
+            - run-tests
+      - deploy:
+          <<: *deployment-defaults
+          name: deploy-to-staging
+          environment: staging
+          requires:
+            - run-tests
+      - slack/on-hold:
+          <<: *deployment-defaults
+          requires:
+            - deploy-to-staging
+      - wait-for-approval:
+          <<: *deployment-defaults
+          type: approval
+          requires:
+            - deploy-to-staging
+            - slack/on-hold
+      - deploy:
+          <<: *deployment-defaults
+          name: deploy-to-production
+          environment: production
+          requires:
+            - wait-for-approval
